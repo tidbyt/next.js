@@ -1,0 +1,75 @@
+# Benchmark: `pnpm install` + `pnpm run build` of this repository on Blacksmith runners, for comparing CI cost
+# and speed against other runners. It mirrors the steps of the Modal Sandbox benchmark (shallow checkout,
+# Node from .node-version, pnpm from `packageManager`, install, build) so that the timings line up step by step.
+#
+# Each runner size runs in three cache modes:
+#   cold        no caches restored (every dependency downloaded, every turbo task run)
+#   pnpm        the pnpm store restored from actions/cache, the usual CI setup
+#   pnpm+turbo  the pnpm store and turbo's local task cache (.turbo/cache) restored
+# Caches are saved at the end of each warm-mode job, so the first run seeds them: trigger the workflow at
+# least twice and compare the later runs.
+#
+# Triggered by pushes to the `blacksmith-benchmark` branch or manually; it does not run on pull requests,
+# so opening a PR in the fork will not start it (and would start the regular CI instead).
+
+name: Blacksmith benchmark
+
+on:
+  push:
+    branches: [blacksmith-benchmark]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  build:
+    name: 'build (${{ matrix.runner }}, ${{ matrix.cache }})'
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [blacksmith-2vcpu-ubuntu-2404, blacksmith-4vcpu-ubuntu-2404]
+        cache: [cold, pnpm, pnpm+turbo]
+    steps:
+      - name: checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: setup-node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: .node-version
+
+      - name: setup-pnpm
+        run: |
+          set -euo pipefail
+          corepack enable
+          pnpm --version
+          echo "PNPM_STORE=$(pnpm store path --silent)" >> "$GITHUB_ENV"
+
+      - name: restore pnpm store
+        if: matrix.cache != 'cold'
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ${{ env.PNPM_STORE }}
+          key: pnpm-${{ matrix.runner }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ matrix.runner }}-
+
+      - name: restore turbo cache
+        if: matrix.cache == 'pnpm+turbo'
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: .turbo/cache
+          key: turbo-${{ matrix.runner }}-${{ github.sha }}
+          restore-keys: turbo-${{ matrix.runner }}-
+
+      - name: install
+        run: pnpm install
+
+      - name: build
+        run: pnpm run build
